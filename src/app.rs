@@ -13,7 +13,7 @@ use crate::audio::{AudioCommand, AudioEvent, AudioPlayer, MprisCommand, MprisUpd
 use crate::audio::mpris;
 use crate::audio::spectrum::SpectrumAnalyzer;
 use crate::library::models::Track;
-use crate::library::{load_cover, scan_folder};
+use crate::library::{load_cover, scan_folder, scan_folder_incremental};
 use crate::ui::{theme, views};
 
 pub const MIN_SIDEBAR_WIDTH: f32 = 180.0;
@@ -946,18 +946,21 @@ impl AppState {
             }
         });
 
+        let cached_tracks = crate::library::load_cache().unwrap_or_default();
+        let initial_all_tracks = Arc::new(cached_tracks);
+
+        // Launch-time scan only re-reads files changed since the cache was
+        // written; F5 (RescanLibrary) still does a full rescan.
         let music_dir = cfg.music_path();
+        let cached_for_scan = Arc::clone(&initial_all_tracks);
         let scan_task = Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || scan_folder(&music_dir))
+                tokio::task::spawn_blocking(move || scan_folder_incremental(&music_dir, &cached_for_scan))
                     .await
                     .unwrap_or_default()
             },
             Message::LibraryScanned,
         );
-
-        let cached_tracks = crate::library::load_cache().unwrap_or_default();
-        let initial_all_tracks = Arc::new(cached_tracks);
 
         let mut initial_folder_cache: HashMap<PathBuf, Vec<Track>> = HashMap::new();
         for track in initial_all_tracks.iter() {
@@ -1158,12 +1161,15 @@ impl AppState {
 
                     state.update_filtered_tracks();
 
-                    let mut restored_queue = Vec::new();
-                    for path in last_queue {
-                        if let Some(t) = state.all_tracks.iter().find(|track| track.path == path) {
-                            restored_queue.push(t.clone());
-                        }
-                    }
+                    // Index by path: a saved queue can be the whole library,
+                    // and a linear find per entry is quadratic (~2.4e9
+                    // comparisons for 49k tracks, blocking startup for ~1 min).
+                    let by_path: HashMap<&std::path::Path, &Track> =
+                        state.all_tracks.iter().map(|t| (t.path.as_path(), t)).collect();
+                    let restored_queue: Vec<Track> = last_queue
+                        .iter()
+                        .filter_map(|path| by_path.get(path.as_path()).map(|t| (*t).clone()))
+                        .collect();
                     if !restored_queue.is_empty() {
                         state.queue = restored_queue;
                     } else {
@@ -3439,6 +3445,14 @@ impl AppState {
 
             Message::LibraryScanned(tracks) => {
                 self.is_scanning = false;
+                // An empty result while we already know tracks means the
+                // library is unavailable (e.g. the music drive is unplugged),
+                // not that every file was deleted: keep the current library
+                // and cache instead of wiping them.
+                if tracks.is_empty() && !self.all_tracks.is_empty() {
+                    log::warn!("library scan found no tracks in {}; keeping cached library", crate::config::get().music_path().display());
+                    return Task::none();
+                }
                 crate::library::save_cache(&tracks);
                 let had_existing_tracks = !self.all_tracks.is_empty();
                 self.all_tracks = Arc::new(tracks);

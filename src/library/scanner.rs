@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use lofty::config::WriteOptions;
@@ -64,10 +66,40 @@ pub fn write_like_status_atomic(path: &Path, is_liked: bool) -> Result<()> {
     Ok(())
 }
 
+/// Start time of the most recent scan, in milliseconds since the Unix epoch
+/// (0 = no scan yet). `save_cache` stamps the cache file's mtime with it, so
+/// the next incremental scan can trust cached entries for files that were
+/// last modified before that scan began.
+static LAST_SCAN_STARTED_MS: AtomicU64 = AtomicU64::new(0);
+
 /// Scan `dir` recursively and return tracks sorted by album/number/title.
 /// `cover_data` is always `None` — loaded on demand via `load_cover`.
+/// Re-reads the tags of every file.
 pub fn scan_folder(dir: &Path) -> Vec<Track> {
+    scan(dir, None)
+}
+
+/// Like `scan_folder`, but reuses `cached` entries for files whose mtime is
+/// older than the cache's stamp; only new or modified files have their tags
+/// read. Deleted files drop out because only existing paths are kept. Falls
+/// back to a full scan when the cache stamp is unavailable.
+pub fn scan_folder_incremental(dir: &Path, cached: &[Track]) -> Vec<Track> {
+    let stamp = std::fs::metadata(crate::paths::library_cache()).and_then(|m| m.modified()).ok();
+    match stamp {
+        Some(stamp) if !cached.is_empty() => {
+            let by_path: HashMap<&Path, &Track> = cached.iter().map(|t| (t.path.as_path(), t)).collect();
+            scan(dir, Some((by_path, stamp)))
+        }
+        _ => scan(dir, None),
+    }
+}
+
+fn scan(dir: &Path, reuse: Option<(HashMap<&Path, &Track>, SystemTime)>) -> Vec<Track> {
     use rayon::prelude::*;
+
+    let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    LAST_SCAN_STARTED_MS.store(now_ms, Ordering::Relaxed);
+    let started = std::time::Instant::now();
 
     let paths: Vec<PathBuf> = WalkDir::new(dir)
         .into_iter()
@@ -83,12 +115,36 @@ pub fn scan_folder(dir: &Path) -> Vec<Track> {
         })
         .collect();
 
+    // Split into tracks that can be reused from the cache and paths whose
+    // tags must be (re)read.
+    let mut reused: Vec<Track> = Vec::new();
+    let paths: Vec<PathBuf> = match &reuse {
+        Some((by_path, stamp)) => paths
+            .into_iter()
+            .filter(|path| {
+                let unchanged = std::fs::metadata(path)
+                    .and_then(|m| m.modified())
+                    .map(|mtime| mtime < *stamp)
+                    .unwrap_or(false);
+                match by_path.get(path.as_path()) {
+                    Some(track) if unchanged => {
+                        reused.push((*track).clone());
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .collect(),
+        None => paths,
+    };
+    log::info!("library scan: {} cached, {} to read (walk {:?})", reused.len(), paths.len(), started.elapsed());
+
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(4)
         .build()
         .ok();
 
-    let mut pairs: Vec<(PathBuf, TrackInfo)> = if let Some(p) = pool {
+    let pairs: Vec<(PathBuf, TrackInfo)> = if let Some(p) = pool {
         p.install(|| {
             paths
                 .into_par_iter()
@@ -102,16 +158,7 @@ pub fn scan_folder(dir: &Path) -> Vec<Track> {
             .collect()
     };
 
-    pairs.sort_by(|(_, a), (_, b)| {
-        a.album.cmp(&b.album)
-            .then(a.disc_number.cmp(&b.disc_number))
-            .then(a.track_number.cmp(&b.track_number))
-            .then(a.title.cmp(&b.title))
-    });
-
-
-    pairs.into_iter().enumerate().map(|(_i, (path, info))| {
-        let play_count = crate::db::get(|db| db.play_counts.get(&path).copied().unwrap_or(0));
+    let mut tracks: Vec<Track> = pairs.into_iter().map(|(path, info)| {
         Track {
             id: {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -129,12 +176,30 @@ pub fn scan_folder(dir: &Path) -> Vec<Track> {
             cover_data: None,
             genre: info.genre,
             year: info.year,
-            play_count,
+            play_count: 0,
             liked: info.liked,
             date_played: None,
             lyrics: info.lyrics,
         }
-    }).collect()
+    }).collect();
+    tracks.append(&mut reused);
+
+    // Play counts live in db.json, not in the files, so refresh them for
+    // reused entries too.
+    crate::db::get(|db| {
+        for t in tracks.iter_mut() {
+            t.play_count = db.play_counts.get(&t.path).copied().unwrap_or(0);
+        }
+    });
+
+    tracks.sort_by(|a, b| {
+        a.album.cmp(&b.album)
+            .then(a.disc_number.cmp(&b.disc_number))
+            .then(a.track_number.cmp(&b.track_number))
+            .then(a.title.cmp(&b.title))
+    });
+    log::info!("library scan: {} tracks in {:?}", tracks.len(), started.elapsed());
+    tracks
 }
 
 pub fn load_cache() -> Option<Vec<Track>> {
@@ -150,7 +215,16 @@ pub fn load_cache() -> Option<Vec<Track>> {
 pub fn save_cache(tracks: &[Track]) {
     let p = crate::paths::library_cache();
     if let Ok(json) = serde_json::to_string(tracks) {
-        std::fs::write(p, json).ok();
+        if std::fs::write(&p, json).is_ok() {
+            // Stamp the cache with the scan start so files modified while the
+            // scan was running are re-read next time.
+            let started_ms = LAST_SCAN_STARTED_MS.load(Ordering::Relaxed);
+            if started_ms != 0 {
+                if let Ok(f) = std::fs::File::options().write(true).open(&p) {
+                    f.set_modified(UNIX_EPOCH + Duration::from_millis(started_ms)).ok();
+                }
+            }
+        }
     }
 }
 
