@@ -20,8 +20,19 @@ BarWidget {
         execProcess.running = true;
     }
 
+    // Closing the omaTUNES window only hides it (playback continues), so
+    // "open" asks the app to reopen its window via MPRIS Raise, then focuses
+    // it in Hyprland.
     function focusOmatunes() {
-        runCmd("hyprctl dispatch focuswindow class:^omatunes$ || hyprctl dispatch focuswindow title:OmaTUNES || omarchy-launch-or-focus omatunes");
+        popupCard.open = false;
+        if (root.activePlayer && root.activePlayer.canRaise) root.activePlayer.raise();
+        runCmd("sleep 0.3; hyprctl dispatch 'hl.dsp.focus({ window = \"class:^omatunes$\" })' >/dev/null 2>&1 || hyprctl dispatch focuswindow 'class:^omatunes$' >/dev/null 2>&1");
+    }
+
+    function quitOmatunes() {
+        popupCard.open = false;
+        if (root.activePlayer && root.activePlayer.canQuit) root.activePlayer.quit();
+        else root.runCmd("python3 -c \"import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b'quit',('127.0.0.1',18888))\"");
     }
 
     // STRICT OmaTUNES matching ONLY - Never fall back to other media players!
@@ -139,15 +150,12 @@ BarWidget {
         horizontalMargin: 8
         verticalPadding: 6
 
+        // Left: open/focus the omaTUNES window. Right: mini player. Middle: like.
         onPressed: function(btn) {
             if (btn === Qt.RightButton) {
                 popupCard.open = !popupCard.open;
             } else if (btn === Qt.LeftButton) {
-                if (root.activePlayer && root.activePlayer.togglePlaying) {
-                    root.activePlayer.togglePlaying();
-                } else {
-                    root.runCmd("playerctl --player=omatunes play-pause");
-                }
+                root.focusOmatunes();
             } else if (btn === Qt.MiddleButton) {
                 root.runCmd("python3 -c \"import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b'like', ('127.0.0.1', 18888))\"");
                 root.isLiked = !root.isLiked;
@@ -175,7 +183,7 @@ BarWidget {
         bar: root.bar
         padding: 16
         contentWidth: 380
-        contentHeight: 490
+        contentHeight: 526
 
         Rectangle {
             anchors.fill: parent
@@ -451,6 +459,42 @@ BarWidget {
 
                             onClicked: function(mouse) { setVolume(mouse.x); }
                             onPositionChanged: function(mouse) { if (pressed) setVolume(mouse.x); }
+                        }
+                    }
+                }
+
+                // App Controls: [Open window] [Quit]
+                RowLayout {
+                    Layout.alignment: Qt.AlignHCenter
+                    spacing: 32
+
+                    Text {
+                        text: "  Open"   // nf-fa-window_maximize
+                        color: openArea.containsMouse ? Color.accent : Color.muted
+                        font.family: root.bar ? root.bar.fontFamily : "sans-serif"
+                        font.pixelSize: Style.font.body
+
+                        MouseArea {
+                            id: openArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.focusOmatunes()
+                        }
+                    }
+
+                    Text {
+                        text: "  Quit"   // nf-fa-power_off
+                        color: quitArea.containsMouse ? "#e67e80" : Color.muted
+                        font.family: root.bar ? root.bar.fontFamily : "sans-serif"
+                        font.pixelSize: Style.font.body
+
+                        MouseArea {
+                            id: quitArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.quitOmatunes()
                         }
                     }
                 }

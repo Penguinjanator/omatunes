@@ -21,3 +21,12 @@ pub fn library_cache() -> PathBuf {
     config_dir().join("library_cache.json")
 }
 
+/// Lock file held for the lifetime of the running instance. Lives in
+/// `$XDG_RUNTIME_DIR` (per-user tmpfs) when available.
+pub fn instance_lock() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(config_dir)
+        .join("omatunes.lock")
+}
+

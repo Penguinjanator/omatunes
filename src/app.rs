@@ -204,6 +204,10 @@ pub enum Message {
     TagEditorNextTrack,
     LibraryScanned(Vec<Track>),
     RescanLibrary,
+    /// Reopen the main window (or focus it if it is already open).
+    ShowWindow,
+    WindowClosed(iced::window::Id),
+    Quit,
     KeyboardLike,
     KeyboardEdit,
     KeyboardAdd,
@@ -579,6 +583,9 @@ pub struct AppState {
     pub dragging_right_panel: bool,
     pub is_hovering_right_panel_resizer: bool,
     pub window_width: f32,
+    /// The main window, or `None` while omatunes is running in the background
+    /// (window closed, playback and MPRIS still active).
+    pub main_window: Option<iced::window::Id>,
 
     pub iced_theme: iced::Theme,
     loaded_theme_name: String,
@@ -910,7 +917,7 @@ impl AppState {
         cache.handle.clone()
     }
 
-    fn new() -> (Self, Task<Message>) {
+    fn new(show_window: bool) -> (Self, Task<Message>) {
         let audio = AudioPlayer::spawn();
         let spectrum_analyzer = SpectrumAnalyzer::new(audio.sample_buffer.clone());
 
@@ -998,6 +1005,7 @@ impl AppState {
             dragging_right_panel: false,
             is_hovering_right_panel_resizer: false,
             window_width: 960.0,
+            main_window: None,
             iced_theme,
             loaded_theme_name,
             strings: crate::locale::get(),
@@ -1213,7 +1221,13 @@ impl AppState {
             state.next_notification_id += 1;
         }
 
-        (state, scan_task)
+        if !show_window {
+            return (state, scan_task);
+        }
+        let (main_window, open_window) = iced::window::open(main_window_settings());
+        state.main_window = Some(main_window);
+
+        (state, Task::batch([open_window.map(|_| Message::Noop), scan_task]))
     }
 
 
@@ -2359,6 +2373,8 @@ impl AppState {
                             self.last_accumulated_position = new_pos;
                             self.send_mpris(MprisUpdate::Position(new_pos));
                         }
+                        MprisCommand::Raise => tasks.push(self.show_window()),
+                        MprisCommand::Quit => self.quit(),
                     }
                 }
 
@@ -3879,6 +3895,19 @@ impl AppState {
                 }
                 Task::none()
             }
+
+            Message::ShowWindow => self.show_window(),
+
+            Message::WindowClosed(id) => {
+                // Closing the window only hides omatunes; it keeps playing and
+                // stays reachable from the bar (MPRIS Raise / Quit).
+                if self.main_window == Some(id) {
+                    self.main_window = None;
+                }
+                Task::none()
+            }
+
+            Message::Quit => self.quit(),
 
             Message::WindowResized(w, h) => {
                 self.window_height = h;
@@ -7249,6 +7278,7 @@ impl AppState {
             iced::time::every(Duration::from_millis(100)).map(|_| Message::PollAudio),
             iced::time::every(Duration::from_secs(3)).map(|_| Message::CheckTheme),
             iced::time::every(Duration::from_secs(5)).map(|_| Message::FlushBuffers),
+            iced::window::close_events().map(Message::WindowClosed),
             iced::keyboard::on_key_press(|key, _mods| {
                 Some(Message::KeyPressed(key))
             }),
@@ -7381,6 +7411,8 @@ impl AppState {
                                 "prev" => return Some((Message::PreviousTrack, Some(s))),
                                 "shuffle" => return Some((Message::ToggleShuffle, Some(s))),
                                 "repeat" => return Some((Message::ToggleRepeat, Some(s))),
+                                "show" => return Some((Message::ShowWindow, Some(s))),
+                                "quit" => return Some((Message::Quit, Some(s))),
                                 _ => {}
                             }
                         }
@@ -7398,6 +7430,31 @@ impl AppState {
         }
 
         Subscription::batch(subs)
+    }
+
+    fn view_window(&self, _window: iced::window::Id) -> Element<'_, Message> {
+        self.view()
+    }
+
+    fn show_window(&mut self) -> Task<Message> {
+        match self.main_window {
+            Some(id) => iced::window::gain_focus(id),
+            None => {
+                let (id, open) = iced::window::open(main_window_settings());
+                self.main_window = Some(id);
+                open.map(|_| Message::Noop)
+            }
+        }
+    }
+
+    /// Persist state and exit right away. Returning through iced's runtime
+    /// would block until an in-flight library scan (spawn_blocking) finishes,
+    /// leaving a windowless process that keeps playing audio.
+    fn quit(&mut self) -> ! {
+        crate::library::pending::flush_sync();
+        crate::db::flush_sync();
+        crate::stats::flush_sync();
+        std::process::exit(0)
     }
 
     fn header_view(&self) -> Element<'_, Message> {
@@ -7726,8 +7783,23 @@ fn merge_song_order(manual_order: &[PathBuf], live_set: &[PathBuf]) -> Vec<PathB
 
 // ── Ponto de entrada iced ─────────────────────────────────────────────────────
 
-pub fn run() -> iced::Result {
-    iced::application("omatunes", AppState::update, AppState::view)
+fn main_window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(960.0, 640.0),
+        min_size: Some(iced::Size::new(700.0, 480.0)),
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "omatunes".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Runs as an iced daemon so closing the window keeps omatunes (playback,
+/// MPRIS, bar widget) running; the window is reopened via `ShowWindow`.
+/// With `show_window` false it starts in the background (bar only).
+pub fn run(show_window: bool) -> iced::Result {
+    iced::daemon("omatunes", AppState::update, AppState::view_window)
         .subscription(AppState::subscription)
         .font(include_bytes!("../assets/JetBrainsMonoNerdFontMono-Regular.ttf"))
         .default_font(iced::Font {
@@ -7736,16 +7808,7 @@ pub fn run() -> iced::Result {
             stretch: iced::font::Stretch::Normal,
             style: iced::font::Style::Normal,
         })
-        .theme(|state: &AppState| state.iced_theme.clone())
-        .scale_factor(|state: &AppState| state.font_scale as f64)
-        .window(iced::window::Settings {
-            size: iced::Size::new(960.0, 640.0),
-            min_size: Some(iced::Size::new(700.0, 480.0)),
-            platform_specific: iced::window::settings::PlatformSpecific {
-                application_id: "omatunes".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .run_with(AppState::new)
+        .theme(|state: &AppState, _window| state.iced_theme.clone())
+        .scale_factor(|state: &AppState, _window| state.font_scale as f64)
+        .run_with(move || AppState::new(show_window))
 }

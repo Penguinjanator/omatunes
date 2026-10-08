@@ -12,6 +12,10 @@ pub enum MprisCommand {
     SetVolume(f64),
     SeekTo(std::time::Duration),
     SeekRelative(i64),
+    /// Reopen / focus the main window.
+    Raise,
+    /// Exit the application.
+    Quit,
 }
 
 #[derive(Debug)]
@@ -52,6 +56,9 @@ pub fn launch(
                 .can_go_next(true)
                 .can_go_previous(true)
                 .can_seek(true)
+                .can_raise(true)
+                .can_quit(true)
+                .desktop_entry("omatunes")
                 .build()
                 .await
             {
@@ -93,6 +100,10 @@ pub fn launch(
                 let micros = offset.as_micros() as i64;
                 let _ = tx.send(MprisCommand::SeekRelative(micros));
             });
+            let tx = cmd_tx.clone();
+            player.connect_raise(move |_| { let _ = tx.send(MprisCommand::Raise); });
+            let tx = cmd_tx.clone();
+            player.connect_quit(move |_| { let _ = tx.send(MprisCommand::Quit); });
 
             // Run the player's D-Bus loop in parallel with the update loop.
             // Without this, the player registers on D-Bus but doesn't process any commands.

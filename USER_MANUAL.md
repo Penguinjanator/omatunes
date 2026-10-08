@@ -283,11 +283,11 @@ Running `install.sh` automatically detects your environment and copies the neces
 
 ### Module Features & Mouse Controls
 
-- **Offline Auto-Hide**: When OmaTUNES is closed, the bar widget dynamically hides (`visible: false`), leaving `0` empty space on your status bar.
-- **Active Player Display**: When OmaTUNES is open, the bar widget appears displaying playback status (`󰐊`/`󰏤`), `Artist - Title`, and a heart icon (``) if liked.
+- **Offline Auto-Hide**: When OmaTUNES is not running, the bar widget dynamically hides (`visible: false`), leaving `0` empty space on your status bar. Closing the OmaTUNES window does not quit it: playback continues and the widget stays in the bar.
+- **Active Player Display**: When OmaTUNES is running, the bar widget appears displaying playback status (`󰐊`/`󰏤`), `Artist - Title`, and a heart icon (``) if liked.
 - **Mouse Controls**:
-  - **Left Click**: Toggle Play / Pause.
-  - **Right Click**: Toggle the pop-up mini-player control card.
+  - **Left Click**: Open the OmaTUNES window (reopens it if closed, focuses it if open).
+  - **Right Click**: Toggle the pop-up mini-player control card, which also has **Open** and **Quit** buttons.
   - **Middle Click**: Toggle Like / Heart status.
   - **Scroll Wheel Up / Down**: Adjust system volume.
 

@@ -41,7 +41,7 @@ The [USER_MANUAL.md](USER_MANUAL.md) covers everything in detail — every keybi
 
 | Requirement | Notes |
 |---|---|
-| Rust ≥ 1.75 | `rustup` is the easiest way to get it |
+| Rust ≥ 1.89 | `rustup` is the easiest way to get it |
 | A Nerd Font | Ships configured for `JetBrainsMono Nerd Font Mono`, but any Nerd Font works |
 | PipeWire or PulseAudio | Audio output runs through cpal |
 | D-Bus session bus | Needed for MPRIS2 — make sure `DBUS_SESSION_BUS_ADDRESS` is set |
@@ -201,9 +201,9 @@ OmatunesWidget {}
 ### Module Features & Mouse Controls
 
 - **Bar Widget Display**:
-  - **Offline (OmaTUNES closed)**: Automatically hides from your bar (`visible: false`) to keep your panel clean.
+  - **Offline (OmaTUNES not running)**: Automatically hides from your bar (`visible: false`) to keep your panel clean. Closing the omaTUNES window does not quit it — playback continues and the widget stays in the bar.
   - **Playing / Open**: Appears on your bar with play state (`󰐊`/`󰏤`), `Artist - Song Title`, and a red heart icon (``) if liked.
-  - **Left Click**: Play / Pause track.
+  - **Left Click**: Open the omaTUNES window (reopens it if closed, focuses it if open).
   - **Right Click**: Toggle interactive mini-player pop-up window.
   - **Middle Click**: Toggle Like / Unlike for the current track.
   - **Scroll Wheel Up / Down**: Adjust volume smoothly.
@@ -212,6 +212,7 @@ OmatunesWidget {}
   - **Album Cover**: High-res album art (75% width). Click artwork or title to bring the main omaTUNES window to the foreground.
   - **Transport Controls**: Shuffle (``), Previous (``), Play/Pause (``/``), Next (``), and Repeat (``). Active mode buttons illuminate in your system accent color.
   - **Volume Slider**: Interactive volume control bar.
+  - **Open / Quit**: Open the main window, or fully quit omaTUNES (the only way to exit besides MPRIS `Quit`).
 
 ---
 
