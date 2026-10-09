@@ -988,8 +988,8 @@ impl AppState {
             position: Duration::ZERO,
             duration: Duration::ZERO,
             volume: cfg.volume.clamp(0.0, 1.0),
-            shuffle: cfg.playback_defaults.album.shuffle,
-            repeat: cfg.playback_defaults.album.repeat,
+            shuffle: crate::db::get(|db| db.shuffle).unwrap_or(cfg.playback_defaults.album.shuffle),
+            repeat: crate::db::get(|db| db.repeat).unwrap_or(cfg.playback_defaults.album.repeat),
             folders: if initial_folders.is_empty() { folders } else { initial_folders },
             selected_folder: None,
             tracks: Arc::new(Vec::new()),
@@ -1279,9 +1279,49 @@ impl AppState {
             });
         }
         self.send_mpris(MprisUpdate::Status(status));
+        self.publish_playback_modes();
+    }
+
+    /// Push shuffle/repeat to MPRIS and the bar widget's state file, and save
+    /// them so the next launch restores them.
+    fn publish_playback_modes(&self) {
         self.send_mpris(MprisUpdate::Shuffle(self.shuffle));
-        self.send_mpris(MprisUpdate::Loop(if self.repeat { mpris_server::LoopStatus::Track } else { mpris_server::LoopStatus::None }));
+        // Repeat wraps the whole queue (see AudioEvent::TrackEnded): MPRIS "Playlist".
+        self.send_mpris(MprisUpdate::Loop(if self.repeat { LoopStatus::Playlist } else { LoopStatus::None }));
         self.write_current_liked_status();
+        let modes = (Some(self.shuffle), Some(self.repeat));
+        if crate::db::get(|db| (db.shuffle, db.repeat)) != modes {
+            crate::db::write(|db| {
+                db.shuffle = modes.0;
+                db.repeat = modes.1;
+            });
+        }
+    }
+
+    /// Shuffle on: shuffle the queue, current track first. Off: back to the
+    /// current view's order.
+    fn set_shuffle(&mut self, on: bool) {
+        if on == self.shuffle {
+            return;
+        }
+        self.shuffle = on;
+        if on {
+            let anchor = self.current_track.as_ref().map(|t| t.id);
+            self.maybe_shuffle_queue(anchor);
+        } else if !self.queue.is_empty() {
+            self.queue = (*self.tracks).clone();
+            let queue_paths: Vec<PathBuf> = self.queue.iter().map(|t| t.path.clone()).collect();
+            crate::db::write(|db| db.last_queue_paths = queue_paths);
+        }
+        self.publish_playback_modes();
+    }
+
+    fn set_repeat(&mut self, on: bool) {
+        if on == self.repeat {
+            return;
+        }
+        self.repeat = on;
+        self.publish_playback_modes();
     }
 
     fn write_current_liked_status(&self) {
@@ -1954,45 +1994,12 @@ impl AppState {
             }
 
             Message::ToggleShuffle => {
-                self.shuffle = !self.shuffle;
-                self.send_mpris(MprisUpdate::Shuffle(self.shuffle));
-                if self.shuffle && !self.queue.is_empty() {
-                    // Shuffling queue in-place, keeping the current track at index 0
-                    use rand::seq::SliceRandom;
-                    let mut rng = rand::thread_rng();
-                    let current_track_id = self.current_track.as_ref().map(|t| t.id);
-                    if let Some(ct_id) = current_track_id {
-                        if let Some(pos) = self.queue.iter().position(|t| t.id == ct_id) {
-                            let current_item = self.queue.remove(pos);
-                            self.queue.shuffle(&mut rng);
-                            self.queue.insert(0, current_item);
-                        } else {
-                            self.queue.shuffle(&mut rng);
-                        }
-                    } else {
-                        self.queue.shuffle(&mut rng);
-                    }
-                    let queue_paths: Vec<PathBuf> = self.queue.iter().map(|t| t.path.clone()).collect();
-                    crate::db::write(|db| {
-                        db.last_queue_paths = queue_paths;
-                    });
-                } else if !self.shuffle && !self.queue.is_empty() {
-                    // Restore original order from filtered tracks
-                    self.queue = (*self.tracks).clone();
-                    let queue_paths: Vec<PathBuf> = self.queue.iter().map(|t| t.path.clone()).collect();
-                    crate::db::write(|db| {
-                        db.last_queue_paths = queue_paths;
-                    });
-                }
-                self.write_current_liked_status();
+                self.set_shuffle(!self.shuffle);
                 Task::none()
             }
 
             Message::ToggleRepeat => {
-                self.repeat = !self.repeat;
-                let loop_status = if self.repeat { LoopStatus::Playlist } else { LoopStatus::None };
-                self.send_mpris(MprisUpdate::Loop(loop_status));
-                self.write_current_liked_status();
+                self.set_repeat(!self.repeat);
                 Task::none()
             }
 
@@ -2375,6 +2382,8 @@ impl AppState {
                         }
                         MprisCommand::Raise => tasks.push(self.show_window()),
                         MprisCommand::Quit => self.quit(),
+                        MprisCommand::SetShuffle(on) => self.set_shuffle(on),
+                        MprisCommand::SetLoop(status) => self.set_repeat(status != LoopStatus::None),
                     }
                 }
 

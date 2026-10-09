@@ -141,6 +141,12 @@ pub struct OmatunesDb {
     pub last_queue_paths: Vec<PathBuf>,
     #[serde(default)]
     pub last_position_secs: u64,
+    /// Shuffle / repeat as last used; restored at launch. None until first
+    /// set (launch then falls back to the album playback default).
+    #[serde(default)]
+    pub shuffle: Option<bool>,
+    #[serde(default)]
+    pub repeat: Option<bool>,
     #[serde(default)]
     pub smart_playlists: HashMap<String, crate::library::smart_playlist::SmartPlaylist>,
     #[serde(default)]
@@ -182,6 +188,8 @@ impl Default for OmatunesDb {
             last_track_path: None,
             last_queue_paths: Vec::default(),
             last_position_secs: 0,
+            shuffle: None,
+            repeat: None,
             smart_playlists: HashMap::default(),
             playlist_order: Vec::default(),
             smart_playlist_order: Vec::default(),

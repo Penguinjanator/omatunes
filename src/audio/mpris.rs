@@ -12,6 +12,9 @@ pub enum MprisCommand {
     SetVolume(f64),
     SeekTo(std::time::Duration),
     SeekRelative(i64),
+    /// Shuffle / LoopStatus property writes (bar widget, playerctl).
+    SetShuffle(bool),
+    SetLoop(LoopStatus),
     /// Reopen / focus the main window.
     Raise,
     /// Exit the application.
@@ -104,6 +107,10 @@ pub fn launch(
             player.connect_raise(move |_| { let _ = tx.send(MprisCommand::Raise); });
             let tx = cmd_tx.clone();
             player.connect_quit(move |_| { let _ = tx.send(MprisCommand::Quit); });
+            let tx = cmd_tx.clone();
+            player.connect_set_shuffle(move |_, s| { let _ = tx.send(MprisCommand::SetShuffle(s)); });
+            let tx = cmd_tx.clone();
+            player.connect_set_loop_status(move |_, l| { let _ = tx.send(MprisCommand::SetLoop(l)); });
 
             // Run the player's D-Bus loop in parallel with the update loop.
             // Without this, the player registers on D-Bus but doesn't process any commands.
